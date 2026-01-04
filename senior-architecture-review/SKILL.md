@@ -1,6 +1,7 @@
 ---
 name: senior-architecture-review
-description: Senior-level architecture review (system/program scope). Evaluates architecture, boundaries, non-functional requirements, security posture, operability, delivery risk, and readiness gates. Includes a scoped documentation coherence check for architecture/security standards and maps major findings to OWASP ASVS (architecture/control areas) and NIST guidance (SSDF; optionally 800-53 family language). Report-only: proposes doc diffs inline without modifying repo files.
+description: >-
+  Senior-level architecture review (system/program scope). Evaluates architecture, boundaries, non-functional requirements, security posture, operability, delivery risk, and readiness gates. Includes a scoped documentation coherence check for architecture/security standards and maps major findings to OWASP ASVS (architecture/control areas) and NIST guidance (SSDF; optionally 800-53 family language). Report-only: proposes doc diffs inline without modifying repo files.
 metadata:
   short-description: Senior architecture review (report-only)
   outputs:
