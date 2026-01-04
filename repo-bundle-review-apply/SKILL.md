@@ -20,6 +20,10 @@ Review + apply:
 
 `python3 $CODEX_HOME/skills/repo-bundle-review-apply/scripts/repo_bundle_review_apply.py --repo . --model <model-id> --message "Request feedback + a unified diff patch"`
 
+Manual UI mode (no API call; for ChatGPT “Pro/Thinking” reviews):
+
+`python3 $CODEX_HOME/skills/repo-bundle-review-apply/scripts/repo_bundle_review_apply.py --repo . --manual --message "Request feedback + a unified diff patch"`
+
 Fetch/save patch but don’t apply:
 
 `python3 $CODEX_HOME/skills/repo-bundle-review-apply/scripts/repo_bundle_review_apply.py --repo . --model <model-id> --message "..." --no-apply`
@@ -29,6 +33,7 @@ Fetch/save patch but don’t apply:
 Writes artifacts to `<repo>/.codex-review/` by default:
 
 - `bundle.zip`
+- `prompt.md` (copy/paste this into ChatGPT UI in `--manual` mode)
 - `response.md`
 - `patch.diff`
 
@@ -37,5 +42,6 @@ Writes artifacts to `<repo>/.codex-review/` by default:
 - `--include-git none|metadata|full` (default: `metadata`; metadata sanitizes `.git/config` URLs)
 - `--artifact-dir <path>` (default: `.codex-review` under the repo root)
 - `--bundle-only` (only write `bundle.zip` and exit)
+- `--manual --manual-input file|stdin --manual-response-path <path>` (human-in-the-loop UI flow; waits for response)
 - `--no-background` (single synchronous request; more timeout-prone)
 - `--allow-git-dir-changes` (unsafe; default refuses diffs touching `.git/**`)

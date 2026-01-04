@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -308,6 +309,79 @@ User request:
 """
 
 
+def _manual_instructions(
+    *,
+    bundle_zip: Path,
+    prompt_path: Path,
+    response_path: Path,
+) -> str:
+    return "\n".join(
+        [
+            "",
+            "Manual UI review mode (no API call).",
+            "",
+            "1) Open ChatGPT (web or desktop).",
+            "2) Select the desired model/mode (e.g., GPT-5.2 Pro Thinking).",
+            f"3) Upload this file: {bundle_zip}",
+            f"4) Paste the prompt from: {prompt_path}",
+            "5) Wait for the assistant to respond.",
+            "",
+            "Then save the ENTIRE response (including the ```diff fenced block) to:",
+            f"  {response_path}",
+            "",
+            "Tip (paste into a file from the terminal):",
+            f"  cat > {response_path}",
+            "  # paste response, then press Ctrl-D",
+            "",
+            f"This script will keep waiting and will continue automatically once {response_path} contains a diff.",
+            "",
+        ]
+    )
+
+
+def _wait_for_manual_response(
+    *,
+    response_path: Path,
+    poll_interval_seconds: int,
+    timeout_minutes: int,
+) -> str:
+    deadline = time.time() + (timeout_minutes * 60)
+    last_seen_digest: str | None = None
+
+    while True:
+        if time.time() > deadline:
+            raise RuntimeError(f"Timed out waiting for manual response at: {response_path}")
+
+        if response_path.exists() and response_path.is_file():
+            try:
+                text = response_path.read_text(errors="replace")
+            except OSError:
+                time.sleep(max(1, poll_interval_seconds))
+                continue
+
+            digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+            if last_seen_digest != digest:
+                last_seen_digest = digest
+                if _extract_patch(text):
+                    return text
+                if text.strip():
+                    _eprint(
+                        "[WARN] Response detected but no ```diff fenced patch found yet. "
+                        "Update the response file with a unified diff in a ```diff block."
+                    )
+
+        time.sleep(max(1, poll_interval_seconds))
+
+
+def _read_manual_response_from_stdin() -> str:
+    _eprint("")
+    _eprint("Paste the full model response now, then press Ctrl-D to finish.")
+    try:
+        return sys.stdin.read()
+    except KeyboardInterrupt:
+        raise RuntimeError("Canceled while waiting for manual stdin input.") from None
+
+
 def _extract_output_text(response_json: dict) -> str:
     output_text = response_json.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -344,6 +418,31 @@ def _extract_patch(text: str) -> str | None:
         return text[idx:].strip() + "\n"
 
     return None
+
+
+def _extract_post_apply_steps(text: str) -> str | None:
+    lines = text.splitlines()
+    start_idx: int | None = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*#+\s*Post-apply steps\s*$", line, re.IGNORECASE) or re.match(
+            r"^\s*Post-apply steps\s*:?\s*$",
+            line,
+            re.IGNORECASE,
+        ):
+            start_idx = i + 1
+            break
+
+    if start_idx is None:
+        return None
+
+    collected: list[str] = []
+    for line in lines[start_idx:]:
+        if re.match(r"^\s*#+\s*\S+", line):
+            break
+        collected.append(line)
+
+    steps = "\n".join(collected).strip()
+    return steps if steps else None
 
 
 def _diff_touches_git_dir(diff_text: str) -> bool:
@@ -424,6 +523,23 @@ def main() -> int:
         help=f"Abort if bundle.zip exceeds this size (default: {DEFAULT_MAX_ZIP_BYTES}).",
     )
     parser.add_argument("--bundle-only", action="store_true", help="Only create bundle.zip and exit.")
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Do not call the API. Print ChatGPT UI instructions and wait for a human-provided response.",
+    )
+    parser.add_argument(
+        "--manual-input",
+        choices=["file", "stdin"],
+        default="file",
+        help="In --manual mode, wait for a response file or read the response from stdin (default: file).",
+    )
+    parser.add_argument(
+        "--manual-response-path",
+        default="",
+        help="In --manual --manual-input file, where the human will save the model response "
+        "(default: <artifact-dir>/response.md).",
+    )
     parser.add_argument("--no-background", action="store_true", help="Use a single synchronous request (more timeout-prone).")
     parser.add_argument(
         "--poll-interval-seconds",
@@ -468,6 +584,61 @@ def main() -> int:
     if args.bundle_only:
         print(f"Bundle:    {bundle_zip}")
         print(f"Artifacts: {artifact_dir}")
+        return 0
+
+    if args.manual:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = artifact_dir / "prompt.md"
+        prompt_path.write_text(_build_review_prompt(args.message))
+
+        if args.manual_response_path:
+            response_path = Path(args.manual_response_path)
+            if not response_path.is_absolute():
+                response_path = repo_root / response_path
+        else:
+            response_path = artifact_dir / "response.md"
+        response_path = response_path.resolve()
+        response_path.parent.mkdir(parents=True, exist_ok=True)
+        if not response_path.exists():
+            response_path.write_text("")
+
+        print(_manual_instructions(bundle_zip=bundle_zip, prompt_path=prompt_path, response_path=response_path))
+        _eprint(f"[INFO] Waiting for response... (timeout={args.timeout_minutes} minutes)")
+
+        if args.manual_input == "stdin":
+            text = _read_manual_response_from_stdin()
+            (artifact_dir / "response.md").write_text(text)
+        else:
+            text = _wait_for_manual_response(
+                response_path=response_path,
+                poll_interval_seconds=args.poll_interval_seconds,
+                timeout_minutes=args.timeout_minutes,
+            )
+            if response_path != (artifact_dir / "response.md"):
+                (artifact_dir / "response.md").write_text(text)
+
+        patch = _extract_patch(text)
+        if not patch:
+            raise RuntimeError("No ```diff fenced patch found in the provided response.")
+
+        if not args.allow_git_dir_changes and _diff_touches_git_dir(patch):
+            raise RuntimeError("Refusing to apply patch that touches .git/** (use --allow-git-dir-changes to override).")
+
+        patch_path = artifact_dir / "patch.diff"
+        patch_path.write_text(patch)
+        _eprint(f"[OK] Saved patch: {patch_path}")
+
+        if not args.no_apply:
+            _apply_patch(repo_root, patch_path)
+            _eprint("[OK] Patch applied.")
+
+        print(f"Artifacts: {artifact_dir}")
+        print(f"Response:  {artifact_dir / 'response.md'}")
+        print(f"Patch:     {patch_path}")
+        steps = _extract_post_apply_steps(text)
+        if steps:
+            print("\nPost-apply steps (from model):")
+            print(steps)
         return 0
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -556,6 +727,10 @@ def main() -> int:
     print(f"Artifacts: {artifact_dir}")
     print(f"Response:  {artifact_dir / 'response.md'}")
     print(f"Patch:     {patch_path}")
+    steps = _extract_post_apply_steps(text)
+    if steps:
+        print("\nPost-apply steps (from model):")
+        print(steps)
     return 0
 
 
